@@ -48,7 +48,9 @@
     protected function matchFD($jobs, $fd)
     {
       foreach ($jobs as $jid => $job) 
+      {
         if ($fd === $job[1]) return $jid;
+      }
       throw new Exception("Invalid FD provided, not in jobs table!");
     }
     
@@ -70,7 +72,7 @@
           return true;
         }
       }
-      return false; // False alarm, someone playing with SIGSTOP?
+      return false; // False alarm, WTF?
     }
   
     function __construct()
@@ -85,8 +87,8 @@
      *  
      *  Callback can either echo it's output, in which case it's passed
      *  directly to caller, or it may return something, which is then serialized
-     *  and desiralized at parent as well. This means howerver, that function in
-     *  this case *MUST NOT* produce any output. If this is concern, function
+     *  and desiralized at parent aswell. This means howerver, that function in
+     *  this case *MUST NOT* produce any output. If this is consern, function
      *  may always call ob_clean() before it returns.
      *  
      *  @param string $name        Job name. This name will be then used on results. Job name
@@ -102,18 +104,6 @@
       if (!is_callable($callback)) throw new Exception("Errrr, callback is not callable!");
       $this->jobs[$name] = array($callback, $data);
     }
-
-    /**
-     *  Removes all queued jobs. This method is also called after each execute()
-     *  call. Alternativly you can also remove specific job by passing it's name.
-     *  @param string $name (Optional) Job name to be removed.
-     **/
-    function removeJob($name = null)
-    {
-      if ($this->rjobs) throw new Exception("Do not remove jbos, while they are running!");
-      if ($name === null) $this->jobs = array();
-      else unset($this->jobs[$name]);
-    }
     
     /**
      *  Executes all callback functions each in it's own process and if set so,
@@ -123,14 +113,14 @@
      *             NOT DOING SO, MIGHT RESULT IN SOME SERIOUS AND HARD TO
      *             DEBUG BUGS!
      *  
-     *  @param boolean $wait (Optional) Should parent execution be halted, untill
-     *                       childs complete? If false is given, caller
-     *                       must call waitForChildren() manually.
-     *
-     *                       Defaults to true.
+     *  @param boolean $wait  (Optional) Should parent execution be halted, untill
+     *                        childs complete? If false is given, caller
+     *                        must call waitForChildren() manually.
+     *  @param boolean $throw (Optional) If encountering any exceptions,
+     *                        should these exceptions been thrown?
      *  @returns Ouput from children, or NULL if wait was set to false.
      **/
-    function execute($wait = true)
+    function execute($wait = true, $throw = true)
     {
       if (!is_null($this->rjobs)) throw new Exception("One job list is already running");
       $this->rjobs = array();
@@ -145,9 +135,22 @@
         {
           socket_close($pair[0]);
           self::callForkCallbacks(true);
-          $data = call_user_func_array($job[0], (array)$job[1]);
-          socket_write($pair[1], base64_encode(serialize($data)));
-          socket_close($pair[1]);
+          ob_start();
+          register_shutdown_function(function() use ($pair) {
+            $data = ob_get_clean();
+            if (!defined("NO_SERIALIZATION")) $data = base64_encode(serialize($data));
+            @$success = socket_write($pair[1], $data);
+            @socket_close($pair[1]);
+            if ($success === false)
+              throw new Exception("Error writing to socket, has parent died?");
+          });
+          try { $data = $job[0]($job[1]); }
+          catch (Exception $e) { $data = $e; }
+          if (($data !== null) && (!ob_get_contents())) 
+          {
+            define("NO_SERIALIZATION", 1);
+            echo base64_encode(serialize($data));
+          }
           exit(0);
         }
         else 
@@ -158,15 +161,17 @@
         }
       }
       self::callForkCallbacks(false);
-      if ($wait) return $this->waitForChildren();
+      if ($wait) return $this->waitForChildren($throw);
       return null;
     }
     
     /**
      *  Waits for children and returns their output
+     *  @param boolean $throw (Optional) If encountering any exceptions,
+     *                        should these exceptions been thrown?
      *  @returns Output from children
      **/
-    function waitForChildren()
+    function waitForChildren($throw = true)
     {
       if (is_null($this->rjobs)) return null;
       $results = array();
@@ -195,11 +200,13 @@
       while ($this->waitProcess($results, true));
       // Process incoming data.
       foreach ($results as $key => &$result) 
+      {
         $result["data"] = unserialize(base64_decode($result["data"]));
+        if (($result["data"] instanceof Exception) && ($throw))
+          throw $result["data"];
+      }
       $this->rjobs = null;
-      $this->removeJob();
       return $results;
     }
     
   }
-
